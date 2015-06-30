@@ -1,2 +1,2 @@
-# secretchar
+# secretchat
 security course project
