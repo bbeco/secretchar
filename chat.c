@@ -71,16 +71,19 @@ char* read_common_name(FILE* fp){
 	}
 	return my_mail;
 }
-unsigned char* prepare_cert(FILE* afp,unsigned int* cert_len){
+/* This function takes an open file pointer fp and it closes it before 
+ * returning
+ */
+unsigned char* prepare_cert(FILE* fp,unsigned int* cert_len){
 	struct stat file_info;
 	int fd;
 	int ret;
-	FILE *fp;
 	unsigned char* cert;
-	fp = fopen(CERT_NAME,"r");
 	if(fp == NULL){
 		return NULL;
 	}
+	//to come back to the start
+	rewind(fp);
 	fd = fileno(fp);
 	if(fstat(fd,&file_info) < 0){
 		return NULL;
@@ -95,23 +98,38 @@ unsigned char* prepare_cert(FILE* afp,unsigned int* cert_len){
 	fclose(fp);
 	return cert;
 }
-/*It returns -1 on erro, 0 on mismatching on certificate, 1 on success*/
-int verify_name(FILE* fp,unsigned char *hello,unsigned int hello_len,unsigned char *sign,unsigned int sign_len,unsigned char *cert, unsigned int cert_len,unsigned char** pub_buf,unsigned int *pubbuf_len,X509_STORE* str,int* nonce){	
+/*It returns -1 on erro, 0 on mismatching on certificate, 1 on success.
+ * It closes the passed file pointer fp (which should have already been 
+ * opened).
+ */
+int verify_name(FILE* fp,unsigned char *hello_buf,unsigned int hello_len,unsigned char *sign_buf,unsigned int sign_len,unsigned char** pub_buf,unsigned int *pubbuf_len,X509_STORE* str,int* nonce){	
 	int sheet_len,ret;
 	uint32_t tmp;
 	char read_mail[DIM_MAIL],temp_mail[DIM_MAIL],*cert_mail = NULL;
 	X509_STORE_CTX* cert_ctx = NULL;
 	EVP_PKEY* evp = EVP_PKEY_new();
 	EVP_MD_CTX* ctx = NULL;
+	if (!fp) {
+		ret = -1;
+		goto fail;
+	}
+	//We must come back to the start of fp
+	rewind(fp);
 	X509* cert = PEM_read_X509(fp,NULL,NULL,NULL);
 	*pub_buf = NULL;
+	//the following function is needed to correctly verify the certificate
+	OpenSSL_add_all_algorithms();
 	if((cert_ctx=X509_STORE_CTX_new())==NULL){
+		ret = -1;
 		goto fail;
 	}
 	if(X509_STORE_CTX_init(cert_ctx,str,cert,NULL)<=0){
+		ret = -1;
 		goto fail;
 	}
 	if(X509_verify_cert(cert_ctx)==0){
+		fprintf(stderr, "Verify error: %s\n", X509_verify_cert_error_string(X509_STORE_CTX_get_error(cert_ctx)));
+		ret = 0;
 		goto fail;	
 	}
 	X509_STORE_CTX_cleanup(cert_ctx);
@@ -123,22 +141,23 @@ int verify_name(FILE* fp,unsigned char *hello,unsigned int hello_len,unsigned ch
 		ret = -1;
 		goto fail;
 	}
-	if(EVP_VerifyUpdate(ctx,cipher_buf,cipher_len)==0){
+	if(EVP_VerifyUpdate(ctx,hello_buf,hello_len)==0){
 		ret = -1;
 		goto fail;
 	}
 	if((ret=EVP_VerifyFinal(ctx,sign_buf,sign_len,evp))<=0){
 		goto fail;
 	}
+	//FIXME schianta alla cert mail di seguito! (rewind(fp)??)
 	cert_mail = read_common_name(fp);//set it free later
-	sscanf(hello,"%s%s",temp_mail,read_mail);
+	sscanf(hello_buf,"%s%s",temp_mail,read_mail);
 	sheet_len = strlen(temp_mail)+strlen(read_mail)+2;
 	*pubbuf_len = hello_len - sheet_len;
-	tmp = *((uint32_t *)(hello+sheet_len));
+	tmp = *((uint32_t *)(hello_buf+sheet_len));
 	*nonce = ntohl(tmp);
 	sheet_len+=sizeof(tmp);
 	*pub_buf = (unsigned char*)calloc(1,*pubbuf_len);
-	memcpy(*pub_buf,hello+sheet_len,*pubbuf_len);
+	memcpy(*pub_buf,hello_buf+sheet_len,*pubbuf_len);
 	if(strlen(cert_mail)!=strlen(read_mail)){
 		ret = 0;
 		goto fail;
@@ -169,7 +188,8 @@ int verify_name(FILE* fp,unsigned char *hello,unsigned int hello_len,unsigned ch
 		}
 		EVP_PKEY_free(evp);
 		return ret;
-}	
+}
+
 int send_msg(int sk, unsigned char* buf, int num_bytes,char format) {
 	uint32_t tmp;
     unsigned char* msg;
@@ -393,7 +413,7 @@ int prepare_and_sign_hello(char* mail1,unsigned int length1,char *mail2,unsigned
 	memcpy(*hello_buf + pos, pubkey, publen);
 	pos+=publen;
 	/*sign the hello*/
-	if((*sign_len=sign_hello(*hello_buf,*hello_len,sign_buf,sign_len)<=0)){
+	if((*sign_len=sign_hello(*hello_buf,*hello_len,sign_buf))<=0){
 		return -1;
 	}
 	return 1;
@@ -492,16 +512,13 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str){
 	mypub_len = BN_bn2bin(dh->pub_key,mypub_buf);
 	//input:my_mail,length1,peer_mail,length2,mynonce,mypub_buf,mypub_len
 	//output:hello_buf,hello_len,sign_buf,sign_len
-	if(prepare_and_sign_hello(my_mail,strlen(my_mail),peer_mail,\ 
+	if(prepare_and_sign_hello(my_mail,strlen(my_mail),peer_mail,\
 		strlen(peer_mail),mynonce,mypub_buf,mypub_len,&hello_buf,\
 		&hello_len,&sign_buf,&sign_len)<0){
 		return -1;
 	}
  	cert_buf = prepare_cert(fp,&cert_len);
  	if(cert_buf == NULL){
- 		return -1;
- 	}
- 	if(fclose(fp)!=0){
  		return -1;
  	}
   	if(send_hello(*peer_sk,hello_buf, hello_len, sign_buf, sign_len, cert_buf, cert_len)<=0){
@@ -520,16 +537,16 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str){
 	if((fp=fopen(TMP_CERT,"w+"))==NULL){
 		return -1;
 	}
-	if(fwrite(cert_buf,cert_len,1,fp)<cert_len){
+	if(fwrite(cert_buf,1,cert_len,fp)<cert_len){
 		return -1;
 	}
-	if ((ret=verify_name(fp,,&peerpub_buf, &peerpub_len,str,hello_buf,hello_len, sign_buf, sign_len, &peernonce)) <= 0) {//modify this
+	if ((ret=verify_name(fp,hello_buf,hello_len,sign_buf,sign_len,&peerpub_buf, &peerpub_len,str, &peernonce)) <= 0) {//modify this
 			return -1;
 	}
 	printf("%s\n%s",my_mail,peer_mail);
 	return 1;
 }
-int decode_incoming_message(int sk,char* in_chat,X509_STORE* str){
+int decode_incoming_message(int sk,char* in_chat,int *mynonce, X509_STORE* str){
 	int ret;
 	unsigned char* recv_buf;
 	unsigned char *hello, *sign, *cert;
@@ -539,8 +556,11 @@ int decode_incoming_message(int sk,char* in_chat,X509_STORE* str){
 		if( (ret=recv_hello(sk,&hello,&hello_len,&sign,&sign_len,&cert,&cert_len)) < 0){
 			return -1;
 		}
-		//ret = accept_connection(recv_buf,&mynonce,sk,*in_chat,str);
-//		printf("Ricevuto HELO_MSG1\n");
+		ret = accept_connection(hello, hello_len, sign, sign_len, cert, cert_len,&mynonce,sk,str);
+		if (ret == 0) {
+			ret = -2; //mismatching common name between cert and sent name
+		}
+		printf("Ricevuto HELO_MSG1\n");
 		return ret;	
 	}
 	if((ret=recv_msg(sk,&recv_buf,&format)) == 0){
@@ -560,8 +580,47 @@ int decode_incoming_message(int sk,char* in_chat,X509_STORE* str){
 	}		
 	return -1;//messages with a wrong format, executes close in main
 }
-int accept_connection(unsigned char* buf,int* nonce,int sk,char* in_chat,X509_STORE* str){
-	if(
+/* This function returns -1 in case of unrecoverable error. 0 on common 
+ * name certificate mismatching and 1 on success.
+ */
+int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned char* sign_buf, unsigned int sign_len, unsigned char* cert_buf, unsigned int cert_len, int* nonce,int sk,X509_STORE* str){
+	FILE* fp = NULL;
+	unsigned char *pub_buf = NULL;
+	unsigned int pub_len;
+	int ret;
+	
+	
+	if(hello_buf == NULL || cert_buf == NULL || sign_buf == NULL || sk < 0 || str == NULL) {
+		errno = EINVAL;
+		ret = -1;
+		goto fail;
+	}
+	
+	if ((fp = fopen(TMP_CERT, "w+")) == NULL) { //the 2 cert overlaps
+		ret = -1;
+		goto fail;
+	}
+	
+	if (fwrite(cert_buf, 1, cert_len, fp) < cert_len) {
+		ret = -1;
+		goto fail;
+	}
+	
+	ret = verify_name(fp, hello_buf, hello_len, sign_buf, sign_len, &pub_buf, &pub_len, str, nonce);
+	if ( ret <= 0) {
+		goto fail;
+	}
+	
+	return 1;
+
+fail:	if (fp == NULL) {
+		fclose(fp);
+	}
+	if (pub_buf == NULL) {
+		free(pub_buf);
+	}
+	
+	return ret;
 }
 int main(int argc, char*argv[]) {
 
@@ -696,10 +755,19 @@ int main(int argc, char*argv[]) {
 					}
 				} else{
 				
-						if(decode_incoming_message(peer_sk,&in_chat,str) < 0){
-							perror("error on decoding incoming message\n");
+						ret = decode_incoming_message(peer_sk,&in_chat,&nonce,str);
+						if( ret == -2){
+							fprintf(stderr, "Mismatching name between certificate and sent name. Connection aborted\n");
 							goto close;
 						}
+						if (ret == -1) {
+							fprintf(stderr, "Unrecoverable error");
+							goto close;
+						}
+						if (ret == 0) {
+							fprintf(stderr, "Error on recv()");
+						}
+						
 				/*	if( (ret=recv_msg(i,&recv_buf,&format)) == 0){
 						printf(" client disconnesso\n");
 						goto close;

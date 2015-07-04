@@ -2,7 +2,7 @@
 
 CC=gcc
 LDLIBS=-lcrypto
-CPPFLAGS=-g -Wall
+CPPFLAGS=-g
 
 all: chat
 
