@@ -148,7 +148,7 @@ int verify_name(FILE* fp,unsigned char *hello_buf,unsigned int hello_len,unsigne
 	if((ret=EVP_VerifyFinal(ctx,sign_buf,sign_len,evp))<=0){
 		goto fail;
 	}
-	//FIXME schianta alla cert mail di seguito! (rewind(fp)??)
+	rewind(fp);
 	cert_mail = read_common_name(fp);//set it free later
 	sscanf(hello_buf,"%s%s",temp_mail,read_mail);
 	sheet_len = strlen(temp_mail)+strlen(read_mail)+2;
@@ -481,7 +481,7 @@ fail:	errno = EINVAL;
  * but the program must not terminate, -2 if the program fails completely.
  * It returns 1 on success.
  */
-int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str){
+int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigned char** shared_secret, unsigned int* shared_len){
 	char ipbuf[DIM_IP], peer_mail[DIM_MAIL],*my_mail,*received_mail;
 	DH* dh;
 	EVP_PKEY* evp;
@@ -490,6 +490,8 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str){
 	int peernonce,peer_port,ret;
 	FILE* fp;
 	SAI peer_addr;
+	BIGNUM* peer_pub_par = NULL;
+	*shared_secret = NULL;
 	if((fp = fopen(CERT_NAME, "r"))==NULL){
 		return -2;
 	}
@@ -543,8 +545,27 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str){
 	if ((ret=verify_name(fp,hello_buf,hello_len,sign_buf,sign_len,&peerpub_buf, &peerpub_len,str, &peernonce)) <= 0) {//modify this
 			return -1;
 	}
-	printf("%s\n%s",my_mail,peer_mail);
+	printf("%s\n%s\n",my_mail,peer_mail);
+	
+	peer_pub_par = BN_new();
+	if (BN_bin2bn(peerpub_buf, (int)peerpub_len, peer_pub_par) == NULL) {
+		ret = -1;
+		goto fail;
+	}
+	*shared_secret = (unsigned char*)calloc(1, DH_size(dh));
+	if ((*shared_len = DH_compute_key(*shared_secret, peer_pub_par, dh)) <= 0) {
+		ret = -1;
+		goto fail;
+	}
 	return 1;
+	
+fail: 	if (peer_pub_par != NULL) {
+		BN_free(peer_pub_par);
+	}
+	if (*shared_secret != NULL) {
+		free(*shared_secret);
+	}
+	return ret;
 }
 int decode_incoming_message(int sk,char* in_chat,int *mynonce, X509_STORE* str){
 	int ret;
@@ -560,7 +581,7 @@ int decode_incoming_message(int sk,char* in_chat,int *mynonce, X509_STORE* str){
 		if (ret == 0) {
 			ret = -2; //mismatching common name between cert and sent name
 		}
-		printf("Ricevuto HELO_MSG1\n");
+		printf("Ricevuto HELO_MSG1 e inviato HELO_MSG1\n");
 		return ret;	
 	}
 	if((ret=recv_msg(sk,&recv_buf,&format)) == 0){
@@ -583,11 +604,19 @@ int decode_incoming_message(int sk,char* in_chat,int *mynonce, X509_STORE* str){
 /* This function returns -1 in case of unrecoverable error. 0 on common 
  * name certificate mismatching and 1 on success.
  */
-int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned char* sign_buf, unsigned int sign_len, unsigned char* cert_buf, unsigned int cert_len, int* nonce,int sk,X509_STORE* str){
+int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned char* sign_buf, unsigned int sign_len, unsigned char* cert_buf, unsigned int cert_len, int* nonce,int sk,X509_STORE* str, unsigned char** shared_secret, unsigned int* shared_len){
 	FILE* fp = NULL;
-	unsigned char *pub_buf = NULL;
-	unsigned int pub_len;
-	int ret;
+	char peer_mail[DIM_MAIL],*my_mail;
+	unsigned char *peer_pub_buf = NULL, *my_pub_buf = NULL;
+	unsigned char* my_hello_buf = NULL, *my_sign_buf = NULL;
+	unsigned char* my_cert_buf = NULL;
+	unsigned int my_hello_len, my_sign_len, my_cert_len;
+	unsigned int peer_pub_len, my_pub_len;
+	int ret, peer_nonce;
+	DH* dh = NULL;
+	BIGNUM* peer_pub_par = NULL;
+	
+	*shared_secret = NULL;
 	
 	
 	if(hello_buf == NULL || cert_buf == NULL || sign_buf == NULL || sk < 0 || str == NULL) {
@@ -606,20 +635,83 @@ int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned
 		goto fail;
 	}
 	
-	ret = verify_name(fp, hello_buf, hello_len, sign_buf, sign_len, &pub_buf, &pub_len, str, nonce);
+	ret = verify_name(fp, hello_buf, hello_len, sign_buf, sign_len, &peer_pub_buf, &peer_pub_len, str, &peer_nonce);
 	if ( ret <= 0) {
+		goto fail;
+	}
+	
+	if ((fp = fopen(CERT_NAME, "r")) == NULL) {
+		fprintf(stderr, "Error opening certificate\n");
+		ret = -1;
+		goto fail;
+	}
+	
+	if ((my_mail = read_common_name(fp)) == NULL) {
+		ret = -1;
+		goto fail;
+	}
+	
+	sscanf(hello_buf, "%s", peer_mail);
+	
+	if ((dh = dh_genkey()) == NULL) {
+		ret = -1;
+		goto fail;
+	}
+	
+	my_pub_buf = (unsigned char*)calloc(1, BN_num_bytes(dh->pub_key));
+	my_pub_len = BN_bn2bin(dh->pub_key, my_pub_buf);
+	
+	if ((ret = prepare_and_sign_hello(peer_mail, strlen(peer_mail), my_mail, strlen(my_mail), *nonce, my_pub_buf, my_pub_len, &my_hello_buf, &my_hello_len, &my_sign_buf, &my_sign_len)) != 1) {
+		ret = -1;
+		goto fail;
+	}
+	
+	rewind(fp);
+	if ((my_cert_buf = prepare_cert(fp, &my_cert_len)) == NULL) {
+		ret = -1;
+		goto fail;
+	}
+	
+	if (send_hello(sk, my_hello_buf, my_hello_len, my_sign_buf, my_sign_len, my_cert_buf, my_cert_len) <= 0) {
+		ret = -1;
+		goto fail;
+	}
+	
+	//generating shared secret
+	peer_pub_par = BN_new();
+	if (BN_bin2bn(peer_pub_buf, (int)peer_pub_len, peer_pub_par) == NULL) {
+		ret = -1;
+		goto fail;
+	}
+	*shared_secret = (unsigned char*)calloc(1, DH_size(dh));
+	if ((*shared_len = DH_compute_key(*shared_secret, peer_pub_par, dh)) <= 0) {
+		ret = -1;
 		goto fail;
 	}
 	
 	return 1;
 
-fail:	if (fp == NULL) {
+fail:	if (fp != NULL) {
 		fclose(fp);
 	}
-	if (pub_buf == NULL) {
-		free(pub_buf);
+	if (my_pub_buf != NULL) {
+		free(my_pub_buf);
 	}
 	
+	if (my_hello_buf != NULL) {
+		free(my_hello_buf);
+	}
+	
+	if (my_sign_buf != NULL) {
+		free(my_sign_buf);
+	}
+	
+	if (my_pub_buf != NULL) {
+		free(my_pub_buf);
+	}
+	if (peer_pub_par != NULL) {
+		BN_free(peer_pub_par);
+	}
 	return ret;
 }
 int main(int argc, char*argv[]) {
@@ -640,6 +732,8 @@ int main(int argc, char*argv[]) {
 	char in_chat = 0, ipbuf[DIM_IP];
 	char *format;
 	struct sockaddr_in my_addr, peer_addr;		/* mine and peer's addresses */
+	unsigned char *shared_secret = NULL;	/* The session key */
+	unsigned int shared_len;	/* The session key length */
 	if((fp=fopen(AUTO_CERT,"r"))==NULL){
 		printf("Cannot open the TTP certificate\n");
 		return 1;
@@ -722,7 +816,7 @@ int main(int argc, char*argv[]) {
 						if(buf[0] == '!'){
 							switch (buf[1]){
 							case 'c':
-								if((ret = init_connection(&buf[2],&peer_sk,nonce++,str)) == -1){
+								if((ret = init_connection(&buf[2],&peer_sk,nonce,str, &shared_secret, &shared_len)) == -1){
 									perror("error on initialization\n");
 									goto close;
 								}else if(ret == -2){
@@ -782,15 +876,21 @@ int main(int argc, char*argv[]) {
 			}
 		}
 		continue;
-		close:
-			close(peer_sk);
-			FD_CLR(peer_sk,&rfds);
-			peer_sk = 0;
-			in_chat = 0;
-	}
-	close_all:
-		if(peer_sk != 0){	
-			close(peer_sk);
+close:
+		if (shared_secret == NULL) {
+			free(shared_secret);
 		}
-		close(sk);
+		close(peer_sk);
+		FD_CLR(peer_sk,&rfds);
+		peer_sk = 0;
+		in_chat = 0;
+	}
+close_all:
+	if (shared_secret == NULL) {
+		free(shared_secret);
+	}
+	if(peer_sk != 0){	
+		close(peer_sk);
+	}
+	close(sk);
 }	
