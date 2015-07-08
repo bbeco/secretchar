@@ -11,6 +11,16 @@
 
 int get_common_name(char* dest, const char* src);
 char* read_common_name(FILE* fp);
-int verify_name(FILE* fp,unsigned char *hello_buf,unsigned int hello_len,unsigned char *sign_buf,unsigned int sign_len,unsigned char** pub_buf,unsigned int *pubbuf_len,X509_STORE* str,int* nonce,int init);
+int verify_name(
+	FILE* fp,
+	unsigned char *hello_buf,
+	unsigned int hello_len,
+	unsigned char *sign_buf,
+	unsigned int sign_len,
+	unsigned char** pub_buf,
+	unsigned int *pubbuf_len,
+	X509_STORE* str,
+	int* nonce,
+	int init);
 
 #endif

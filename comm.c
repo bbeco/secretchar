@@ -1,4 +1,12 @@
 #include "comm.h"
+
+/*
+ * This function sends a msg (which is allocated and then set free)
+ * to a socket sk. It appends the length and the format of the 
+ * original message(contained in buf) before sending msg
+ * Errno is set appropriately.
+ * It returns the number of bytes sent or -1 in case of error
+ */
 int send_msg(int sk, unsigned char* buf, int num_bytes,char format) {
 	uint32_t tmp;
     unsigned char* msg;
@@ -23,11 +31,13 @@ int send_msg(int sk, unsigned char* buf, int num_bytes,char format) {
 }
 
 /*
- * This function receive a message from a socket
+ * This function receives a message from a socket
  * It returns the length of the payload in bytes or -1 if an error occurred.
- * This function set errno in case of error.
+ * This function set errno appropriately.
  * @return the number of bytes of the payload or -1 in case of error or 
  * 0 if a disconnection occurs
+ * It leaves the message in **buf (which is allocated) and its
+ * format in *format.
  */
 int recv_msg(int sk, unsigned char** buf,char* format) {
     int ret, buflen;

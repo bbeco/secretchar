@@ -9,9 +9,13 @@
 #define TMP_CERT "/tmp/tmp_cert.pem"
 #define DIM_IP 16
 #define DIM_ENV 646
-#define CERT_NAME "05.pem"
+#define CERT_NAME "my_cert.pem"
 #define SAI struct sockaddr_in
 
+/*
+ * It creates a socket and returns it, in case of error it returns the error
+ * of the function socket, errno is set appropriately
+ */
 int create_socket(SAI* sa,int port,char *ip){
 	if ((port <= 0) || (port > 65535)) {
 		errno = EINVAL;
@@ -50,9 +54,9 @@ int create_socket(SAI* sa,int port,char *ip){
  * format during the connection or -3 in case of some data mismatching
  * (nonce, certificate common name, etc.).
  */
-int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned char* sign_buf, unsigned int sign_len, unsigned char* cert_buf, unsigned int cert_len, int* nonce,int sk,X509_STORE* str, unsigned char** shared_secret, unsigned int* shared_len){
+int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned char* sign_buf, unsigned int sign_len, unsigned char* cert_buf, unsigned int cert_len, int nonce,int sk,X509_STORE* str, unsigned char** shared_secret, unsigned int* shared_len){
 	FILE* fp = NULL;
-	char peer_mail[DIM_MAIL],*my_mail;
+	char peer_mail[DIM_MAIL],*my_mail = NULL;
 	unsigned char *peer_pub_buf = NULL, *my_pub_buf = NULL;
 	unsigned char* my_hello_buf = NULL, *my_sign_buf = NULL;
 	unsigned char* my_cert_buf = NULL;
@@ -90,7 +94,6 @@ int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned
 	}
 	
 	if ((fp = fopen(CERT_NAME, "r")) == NULL) {
-		fprintf(stderr, "Error opening certificate\n");
 		ret = -1;
 		goto fail;
 	}
@@ -110,7 +113,7 @@ int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned
 	my_pub_buf = (unsigned char*)calloc(1, BN_num_bytes(dh->pub_key));
 	my_pub_len = BN_bn2bin(dh->pub_key, my_pub_buf);
 	
-	if ((ret = prepare_and_sign_hello(peer_mail, strlen(peer_mail), my_mail, strlen(my_mail), *nonce, my_pub_buf, my_pub_len, &my_hello_buf, &my_hello_len, &my_sign_buf, &my_sign_len)) != 1) {
+	if ((ret = prepare_and_sign_hello(peer_mail, strlen(peer_mail), my_mail, strlen(my_mail), nonce, my_pub_buf, my_pub_len, &my_hello_buf, &my_hello_len, &my_sign_buf, &my_sign_len)) != 1) {
 		ret = -1;
 		goto fail;
 	}
@@ -148,9 +151,9 @@ int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned
 		goto fail;
 	}
 	
-	//copying nonce
+	//copying and checking nonce
 	memcpy(&tmp, my_hello_buf + my_hello_len - sizeof(tmp), sizeof(tmp));
-	if (*nonce != ntohl(tmp)) {
+	if (nonce != ntohl(tmp)) {
 		ret = -3;
 		goto fail;
 	}
@@ -179,13 +182,23 @@ int accept_connection(unsigned char* hello_buf, unsigned int hello_len, unsigned
 		ret = -1;
 		goto fail;
 	}
-	
+	free(peer_pub_buf);
+	free(my_mail);
 	free(my_hello_buf);
+	free(my_pub_buf);
+	DH_free(dh);
+	BN_free(peer_pub_par);
 	
 	return 1;
 
 fail:	if (fp != NULL) {
 		fclose(fp);
+	}
+	if(dh != NULL){
+		DH_free(dh);
+	}
+	if(my_mail != NULL){
+		free(my_mail);
 	}
 	if (my_pub_buf != NULL) {
 		free(my_pub_buf);
@@ -198,12 +211,17 @@ fail:	if (fp != NULL) {
 	if (my_sign_buf != NULL) {
 		free(my_sign_buf);
 	}
-	
-	if (my_pub_buf != NULL) {
-		free(my_pub_buf);
+	if(my_cert_buf != NULL){
+		free(my_cert_buf);
+	}
+	if(peer_pub_buf != NULL){
+		free(peer_pub_buf);
 	}
 	if (peer_pub_par != NULL) {
 		BN_free(peer_pub_par);
+	}
+	if (*shared_secret != NULL){
+		free(*shared_secret);
 	}
 	return ret;
 }
@@ -212,10 +230,11 @@ fail:	if (fp != NULL) {
  * It performs various checks and returns -1 if the connection can not be established
  * but the program must not terminate, -2 if the program fails completely.
  * It returns 1 on success.
+ * It leaves the shared key generated in **shared_secret(which is allocated)
  */
 int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigned char** shared_secret, unsigned int* shared_len){
-	char ipbuf[DIM_IP], peer_mail[DIM_MAIL],*my_mail;
-	DH* dh;
+	char ipbuf[DIM_IP], peer_mail[DIM_MAIL],*my_mail = NULL;
+	DH* dh = NULL;
 	unsigned int mypub_len,peerpub_len,hello_len,sign_len,cert_len;
 	unsigned char *mypub_buf = NULL,*peerpub_buf = NULL,*hello_buf = NULL,*sign_buf=NULL,*cert_buf=NULL;
 	int peernonce,peer_port,ret;
@@ -226,12 +245,14 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigne
 	uint32_t tmp;
 	char c;
 	int pos;
+	//opening my certificate
 	if((fp = fopen(CERT_NAME, "r"))==NULL){
 		ret = -1;
 		goto fail;
 	}
-	
+	//reading ip, port and mail of the other part from buf (passed as argument)
 	sscanf(buf,"%s%d%s",ipbuf,&peer_port,peer_mail);
+	//initializing connection
 	if((*peer_sk=create_socket(&peer_addr,peer_port,ipbuf)) < 0){
 		ret = -1;
 		goto fail;
@@ -244,6 +265,7 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigne
 		ret = -1;
 		goto fail;
 	}
+	//generating my DH public parameter
 	if((dh=dh_genkey())==NULL){
 		errno = EINVAL;
 		ret = -1;
@@ -251,6 +273,7 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigne
 	}
 	mypub_buf = (unsigned char*)calloc(1,BN_num_bytes(dh->pub_key));
 	mypub_len = BN_bn2bin(dh->pub_key,mypub_buf);
+	
 	//input:my_mail,length1,peer_mail,length2,mynonce,mypub_buf,mypub_len
 	//output:hello_buf,hello_len,sign_buf,sign_len
 	if(prepare_and_sign_hello(my_mail,strlen(my_mail),peer_mail,\
@@ -259,12 +282,14 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigne
 		ret = -1;
 		goto fail;
 	}
+	//saving my certificate in a buffer
  	cert_buf = prepare_cert(fp,&cert_len); //this closes fp
  	fp = NULL;
  	if(cert_buf == NULL){
  		ret = -1;
 		goto fail;
  	}
+ 	//sending HELO_MSG1
   	if(send_hello(*peer_sk,hello_buf, hello_len, sign_buf, sign_len, cert_buf, cert_len)<=0){
 		ret = -1;
 		goto fail;
@@ -276,6 +301,7 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigne
 	 * the next call set the correct hello_buf, hello_len, sign_buf,sign_len, 
 	 * cert and cert_len
 	 */
+	//receiving HELO_MSG1
 	if((ret=recv_hello(*peer_sk,&hello_buf, &hello_len, &sign_buf, &sign_len, &cert_buf, &cert_len))<=0){
 		goto fail;
 	}	
@@ -288,6 +314,7 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigne
 		goto fail;
 	}
 	//this closes fp
+	//verifying HELO_MSG1
 	if ((ret=verify_name(fp,hello_buf,hello_len,sign_buf,sign_len,&peerpub_buf, &peerpub_len,str, &peernonce,1)) <= 0) {
 			fp = NULL;
 			goto fail;
@@ -342,19 +369,27 @@ int init_connection (char* buf,int *peer_sk,int mynonce,X509_STORE* str, unsigne
 		goto fail;
 	}
 	
-	//copying nonce
+	//copying and checking nonce
 	memcpy(&tmp, hello_buf + hello_len - sizeof(tmp), sizeof(tmp));
 	if (mynonce != ntohl(tmp)) {
 		ret = -3;
 		goto fail;
 	}
-	
+	free(my_mail);
 	free(hello_buf);
 	free(mypub_buf);
 	free(peerpub_buf);
+	DH_free(dh);
 	return 1;
 	
-fail: 	if (fp != NULL) {
+fail:
+	if(my_mail !=NULL){
+		free(my_mail);
+	}
+	if(dh != NULL){
+		DH_free(dh);
+	}
+ 	if (fp != NULL) {
 		fclose(fp);
 	}
 	if (hello_buf != NULL) {
@@ -384,7 +419,7 @@ fail: 	if (fp != NULL) {
 /*
  * It returns the same error code convention used before
  */
-int decode_incoming_message(int sk,char* in_chat,int *mynonce, X509_STORE* str, unsigned char** shared_secret, unsigned int* shared_len) {
+int decode_incoming_message(int sk,char* in_chat,int* mynonce, X509_STORE* str, unsigned char** shared_secret, unsigned int* shared_len) {
 	int ret;
 	unsigned char* recv_buf = NULL;
 	unsigned char *hello = NULL, *sign = NULL, *cert = NULL;
@@ -394,11 +429,12 @@ int decode_incoming_message(int sk,char* in_chat,int *mynonce, X509_STORE* str, 
 		if( (ret=recv_hello(sk,&hello,&hello_len,&sign,&sign_len,&cert,&cert_len)) <= 0){
 			goto fail;
 		}
-		ret = accept_connection(hello, hello_len, sign, sign_len, cert, cert_len,mynonce,sk,str, shared_secret, shared_len);
+		ret = accept_connection(hello, hello_len, sign, sign_len, cert, cert_len,*mynonce,sk,str, shared_secret, shared_len);
 		if (ret <= 0) {
 			goto fail;
 		}
 		*in_chat = 1;
+		(*mynonce)++;
 		return 1;	
 	}
 	

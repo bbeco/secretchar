@@ -14,10 +14,9 @@
 #include <sys/stat.h>
 #include "secretchat_support_lib.h"
 #include "secretchat_lib.h"
+
 #define BACKLOG_SIZE 1
-
 #define DIM_BUF 512
-
 #define AUTO_CERT "cacert.pem"
 
 
@@ -124,7 +123,7 @@ int main(int argc, char*argv[]) {
 		for (i=0; i < nfds;i++){
 			if(FD_ISSET(i,&rfds_copy)){
 				if(i == sk){
-					printf("tentativo di connessione\n");
+					printf("Incoming connection\n");
 					len = sizeof(SA);
 					if((peer_sk = accept(sk, (SA*)&peer_addr,&len))==-1){
 						perror ("error on accept\n");
@@ -135,8 +134,7 @@ int main(int argc, char*argv[]) {
 						nfds = peer_sk+1;
 					}
 					//in_chat = 1;
-				}	
-				else if (i == 0){
+				} else if (i == 0){
 					num_byte = read(0,buf,DIM_BUF);
 					if (in_chat == 0){
 						if(buf[0] == '!'){
@@ -159,6 +157,7 @@ int main(int argc, char*argv[]) {
 									fprintf(stderr, "Mismatching in data.\nConnection aborted\n");
 									goto close;
 								}
+								nonce++;
 								FD_SET(peer_sk,&rfds);
 								if (peer_sk >= nfds){
 									nfds = peer_sk+1;
@@ -174,7 +173,7 @@ int main(int argc, char*argv[]) {
 							if(buf[1] == 'q'){
 								goto close;
 							} else{
-								printf("Comando non valido\n");
+								fprintf(stderr, "Invalind command\n");
 							}
 						} else{
 							if(encrypt_msg(peer_sk, (char)CHAT_MSG,(unsigned char*)buf,num_byte, shared_secret) < 0){
@@ -206,8 +205,7 @@ int main(int argc, char*argv[]) {
 						if (ret == 0) {
 							fprintf(stderr, "Client has disconnected\n");
 							goto close;
-						}
-						
+						}	
 				}
 			}
 		}
@@ -221,6 +219,7 @@ close:
 		peer_sk = 0;
 		in_chat = 0;
 	}
+X509_STORE_free(str);
 close_all:
 	if (shared_secret == NULL) {
 		free(shared_secret);
@@ -230,4 +229,4 @@ close_all:
 	}
 	close(sk);
 	return 0;
-}	
+}

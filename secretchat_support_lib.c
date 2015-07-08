@@ -9,10 +9,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define PRIV_KEY "a_privkey.pem"
+#define PRIV_KEY "privkey.pem"
 
-/* sign the buffer passed as argument, returns the length of the signature
+/* This function signs the buffer passed as argument, returns the length of the signature
  * else -1 on error
+ * It leaves the sign in **sign_buf (which is allocated)
  */
 int sign_hello(unsigned char* hello_buf,unsigned int hello_len,unsigned char** sign_buf){
 	EVP_MD_CTX* ctx = NULL;
@@ -29,9 +30,9 @@ int sign_hello(unsigned char* hello_buf,unsigned int hello_len,unsigned char** s
 	if((evp=PEM_read_PrivateKey(fp,NULL,NULL,NULL))==NULL){
 		goto fail;
 	}
-    *sign_buf = (unsigned char*)calloc(1,EVP_PKEY_size(evp));
+	*sign_buf = (unsigned char*)calloc(1,EVP_PKEY_size(evp));
    	if(EVP_SignInit(ctx,EVP_sha512())==0){
-        goto fail;
+		goto fail;
 	}
 	if(EVP_SignUpdate(ctx,hello_buf,hello_len)==0){
 		goto fail;
@@ -48,12 +49,17 @@ int sign_hello(unsigned char* hello_buf,unsigned int hello_len,unsigned char** s
 fail:
 	EVP_MD_CTX_cleanup(ctx); 
 	free(ctx);
-    if (*sign_buf != NULL) {
-        free(*sign_buf);
-    }
-    return -1;
+	if (*sign_buf != NULL) {
+		free(*sign_buf);
+	}
+	return -1;
 }
 
+/*
+ * This function prepares an hello message (mail1' 'mail2' 'nonce pubkey) and leaves it in **hello_buf
+ * (which is allocated) and then It signs hello_buf using the sign function.
+ * It returns 1 on success or -1 in case of error
+ */
 int prepare_and_sign_hello(char* mail1,unsigned int length1,char *mail2,unsigned int length2,int nonce,unsigned char* pubkey, unsigned int publen,unsigned char** hello_buf, unsigned int* hello_len,unsigned char** sign_buf,unsigned int* sign_len){
 	/*create the hello*/
 	uint32_t tmp;
@@ -80,7 +86,10 @@ int prepare_and_sign_hello(char* mail1,unsigned int length1,char *mail2,unsigned
 }
 
 /* This function takes an open file pointer fp and it closes it before 
- * returning
+ * returning.
+ *  It takes the fp of a certificate and write it in a buffer.
+ * It returns the pointer to the buffer or NULL in case of error.
+ * This function allocates cert
  */
 unsigned char* prepare_cert(FILE* fp,unsigned int* cert_len){
 	struct stat file_info;
@@ -99,15 +108,13 @@ unsigned char* prepare_cert(FILE* fp,unsigned int* cert_len){
 	if(fread(cert,1,file_info.st_size,fp)<file_info.st_size){
 		return NULL;
 	}
-	//ret = fread(cert,1,file_info.st_size,fp);
-	//perror("error on fread in prepare_cert\n");
 	*cert_len = file_info.st_size;
 	fclose(fp);
 	return cert;
 }
 
 /* 
- * Create the hello + certificate message and sends it.
+ * Creates the hello + certificate message and sends it.
  * It returns the number of bytes sent or -1 if an error occured. This function
  * set the value of errno in case of error.
  */
@@ -115,67 +122,68 @@ int send_hello(int sk, unsigned char* hello, unsigned int hello_len, \
                     unsigned char* sign, unsigned int sign_len, \
                     unsigned char* cert, unsigned int cert_len)
 {
-    uint32_t tmp;
-    int num_bytes, ret;
-    unsigned char* msg;
-    
-    if (sk < 0 || hello == NULL || sign == NULL || cert == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    
-    /* this message contains the hello string length, the hello string, the
-     * hello string signature length, the hello string signature, the 
-     * certificate length and the certificate
-     */
-    msg = (unsigned char*)calloc(1, hello_len + sign_len + cert_len + \
+	uint32_t tmp;
+	int num_bytes, ret;
+	unsigned char* msg;
+
+	if (sk < 0 || hello == NULL || sign == NULL || cert == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* this message contains the hello string length, the hello string, the
+	* hello string signature length, the hello string signature, the 
+	* certificate length and the certificate
+	*/
+	msg = (unsigned char*)calloc(1, hello_len + sign_len + cert_len + \
 			3*sizeof(tmp));
-   
-    /* appending hello */
-    tmp = htonl(hello_len);
-    memcpy(msg, &tmp, sizeof(tmp));
-    num_bytes = sizeof(tmp);
-    memcpy(msg + num_bytes, hello, hello_len);
-    num_bytes += hello_len;
-    
-    /*appending signature*/
-    tmp = htonl(sign_len);
-    memcpy(msg + num_bytes, &tmp, sizeof(tmp));
-    num_bytes += sizeof(tmp);
-    memcpy(msg + num_bytes, sign, sign_len);
-    num_bytes += sign_len;
-    
-    /*appending certificate*/
-    tmp = htonl(cert_len);
-    memcpy(msg + num_bytes, &tmp, sizeof(tmp));
-    num_bytes += sizeof(tmp);
-    memcpy(msg + num_bytes, cert, cert_len);
-    num_bytes += cert_len;
-    
-    /* sending */
-    if ((ret = send_msg(sk, msg, num_bytes,(char)HELO_MSG1)) <= 0) {
-        free(msg);
-        return -1;
-    }
-    free(msg);
-    return ret;
+
+	/* appending hello */
+	tmp = htonl(hello_len);
+	memcpy(msg, &tmp, sizeof(tmp));
+	num_bytes = sizeof(tmp);
+	memcpy(msg + num_bytes, hello, hello_len);
+	num_bytes += hello_len;
+
+	/*appending signature*/
+	tmp = htonl(sign_len);
+	memcpy(msg + num_bytes, &tmp, sizeof(tmp));
+	num_bytes += sizeof(tmp);
+	memcpy(msg + num_bytes, sign, sign_len);
+	num_bytes += sign_len;
+
+	/*appending certificate*/
+	tmp = htonl(cert_len);
+	memcpy(msg + num_bytes, &tmp, sizeof(tmp));
+	num_bytes += sizeof(tmp);
+	memcpy(msg + num_bytes, cert, cert_len);
+	num_bytes += cert_len;
+
+	/* sending */
+	if ((ret = send_msg(sk, msg, num_bytes,(char)HELO_MSG1)) <= 0) {
+		free(msg);
+		return -1;
+	}
+	free(msg);
+	return ret;
 }
 
 /*
- * This function decrypt a string after it has been received on a socket.
- * It performs previous checking on the format end may discart the 
+ * This function decrypts a string after it has been received on a socket.
+ * It performs previous checking on the format and may discard the 
  * message and return an error if the format mismatch. We can avoid a 
  * decryption if the format mismatches.
  * 
  * @return It returns the plaintext length or -1 if a generic error occured,
  * -2 if the format is not the one expected and 0 in case of disconnection.
+ * It leaves the decrypted message in **plain ( which is allocated).
  */
 int decrypt_msg(int sk, char format, unsigned char** plain, unsigned char* shared_secret)
 {
 	EVP_CIPHER_CTX* ctx;
 	unsigned char iv[EVP_MAX_IV_LENGTH];
 	unsigned int iv_len = EVP_MAX_IV_LENGTH;
-	unsigned char* msg = NULL;
+	unsigned char* msg = NULL;//msg has to set free in this function
 	unsigned int msg_len;
 	char recv_format;
 	int outlen, outtot = 0, ret;
@@ -228,9 +236,10 @@ fail:	EVP_CIPHER_CTX_cleanup(ctx);
 }
 
 /*
- * This function encrypt a string before calling send_msg.
+ * This function encrypts a string before calling send_msg.
  * It also append the given IV for the ecnryption mode.
  * It returns the length of the cipher text (iv is not considered), -1 on error.
+ * Errno is set appropriately
  */
 int encrypt_msg(int sk, char format, unsigned char* plain, unsigned int plain_len, unsigned char* shared_secret)
 {
@@ -276,9 +285,13 @@ fail:	EVP_CIPHER_CTX_cleanup(ctx);
 	if (outbuf != NULL) {
 		free(outbuf);
 	}
-	return -1;	
+	return -1;
+	
 }
 
+/*
+ * This function generates my Diffie Hellmann parameter
+ */
 DH* dh_genkey(){
 	DH *dh = get_dh1024();
 	if(DH_generate_key(dh)!=1){
@@ -289,12 +302,13 @@ DH* dh_genkey(){
 }
 
 /*
- * Receive an hello + certificate message
+ * This function receives an hello + certificate message
  * If something goes wrong, it returns -1 in case of generic error, -2 
  * for format mismatching or 0 in case of disconnection.
  * In case of success it returns the length of the received hello string.
- * The given pointers are allocated using calloc and 
- * must be freed.
+ * The given pointers (hello, sign, cert) are allocated using calloc and 
+ * must be freed. They are intitially set to NULL becasue if something
+ * goes wrong the calling function has no need to set them free
  */
 int recv_hello(int sk, unsigned char** hello, unsigned int* hello_len, \
 					unsigned char** sign, unsigned int *sign_len, \
@@ -302,11 +316,11 @@ int recv_hello(int sk, unsigned char** hello, unsigned int* hello_len, \
 {
 	uint32_t tmp;
 	int msg_len, pos, ret;
-	unsigned char* msg = NULL;
+	unsigned char* msg = NULL;//msg has to set free later in this function
 	char format;
 	*hello = NULL;
 	*sign = NULL;
-	*cert  =NULL;
+	*cert = NULL;
 	if (sk < 0) {
 		errno = EINVAL;
 		return -1;

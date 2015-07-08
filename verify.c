@@ -1,7 +1,7 @@
 #include "verify.h"
 
 /*
- * get the common name field value from an identifier string.
+ * gets the common name field value from an identifier string.
  * The output string is null terminated.
  * It returns -1 and set errno if an error occured. Otherwise, if everything is
  * ok, it returns the number of byte written into dest.
@@ -50,9 +50,21 @@ fail:	errno = EINVAL;
 	return -1;
 }
 
-char* read_common_name(FILE* fp)
-{
-	X509* cert = PEM_read_X509(fp, NULL, NULL, NULL);
+/*
+ * This function reads a common name from a certificate using get_common_name.
+ * It returns ther name or NULL in case of error. Errno is set appropriately.
+ * The file pointer must be opened before calling the function.
+ * The function does not close it. 
+ * It allocates my_mail.
+ */ 
+char* read_common_name(FILE* fp){
+	X509* cert;
+	if(fp==NULL){
+		return NULL;
+	}
+	if((cert=PEM_read_X509(fp, NULL, NULL, NULL))==NULL){
+		return NULL;
+	}
 	X509_NAME* name;
 	int ret;
 	char* identifier;
@@ -65,9 +77,16 @@ char* read_common_name(FILE* fp)
 	return my_mail;
 }
 
-/*It returns -1 on generic error, -3 on mismatching on certificate, 1 on success.
- * It closes the passed file pointer fp (which should have already been 
- * opened).
+/*
+ * This function verifies the validity of the certificate and the matching of the
+ * other part's name with the certificate.
+ * It also checks the sign validity of a message.
+ * It returns -1 on generic error, -3 on mismatching on certificate, 1 on success.
+ * It closes the passed file pointer fp (which should have already been opened).
+ * The last argument is used to distinguish if we are initializing or accepting
+ * a connection and so which is the correct name to verify.
+ * After verifying, It leaves the public parameter of DH and the nonce of the
+ * other part respectively in **pub_buf (which is allocated) and *nonce.
  */
 int verify_name(FILE* fp,unsigned char *hello_buf,unsigned int hello_len,unsigned char *sign_buf,unsigned int sign_len,unsigned char** pub_buf,unsigned int *pubbuf_len,X509_STORE* str,int* nonce,int init){	
 	int sheet_len,ret;
@@ -149,21 +168,21 @@ int verify_name(FILE* fp,unsigned char *hello_buf,unsigned int hello_len,unsigne
 	EVP_PKEY_free(evp);
 	free(cert_mail);
 	return 1;
-fail:
-	fclose(fp);
-	if(cert_mail!=NULL){
-		free(cert_mail);
-	}
-	if(cert_ctx!=NULL){
-		X509_STORE_CTX_cleanup(cert_ctx);
-		X509_STORE_CTX_free(cert_ctx);
-	}
-	if(ctx!=NULL){
-		free(ctx);
-	}	
-	if(*pub_buf!=NULL){
-		free(*pub_buf);
-	}
-	EVP_PKEY_free(evp);
-	return ret;
+	fail:
+		fclose(fp);
+		if(cert_mail!=NULL){
+			free(cert_mail);
+		}
+		if(cert_ctx!=NULL){
+			X509_STORE_CTX_cleanup(cert_ctx);
+			X509_STORE_CTX_free(cert_ctx);
+		}
+		if(ctx!=NULL){
+			free(ctx);
+		}	
+		if(*pub_buf!=NULL){
+			free(*pub_buf);
+		}
+		EVP_PKEY_free(evp);
+		return ret;
 }
